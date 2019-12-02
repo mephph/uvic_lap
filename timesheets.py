@@ -1,23 +1,29 @@
 """
 Utilities for CAL timesheets
 """
-import calendar  # For month names and abbreviations
+import calendar  # For month names
 import datetime  # For date checking and durations
+import json
 
 import pandas as pd
 
-# Prefixes in lower case to make comparison easier. The [1:] slice is needed because the
-# list starts with ''. The list is cast to a tuple because str.startswith requires a
-# tuple.
-MONTH_PREFIXES = tuple(map(str.lower, calendar.month_abbr[1:]))
+########################################################################################
+# Module constants and defaults
+
+with open("pay_periods.json") as f:
+    _PAY_PERIODS = json.load(f)
+
+with open("positions.json") as f:
+    _POSITIONS = json.load(f)
 
 # calendar.month_name is a calendar.py-specific type which only supports __get__ and
 # __len__, not searching.
-MONTH_NAMES = tuple(calendar.month_name)
+_MONTH_NAMES = tuple(calendar.month_name)
+_CURRENT_YEAR = datetime.date.today().year
 
 # Default arguments for Pandas ExcelFile.parse.
-EXCELFILE_HEADER_ROW = 1
-EXCELFILE_USE_COLUMNS = [
+_EXCELFILE_HEADER_ROW = 1
+_EXCELFILE_USE_COLUMNS = [
     "Position",
     "Last Name",
     "First Name",
@@ -29,10 +35,10 @@ EXCELFILE_USE_COLUMNS = [
     "Duration",
     "Notes",
 ]
-EXCELFILE_COLUMN_TYPES = {
+_EXCELFILE_COLUMN_TYPES = {
     "Duration": float,
 }
-EXCELFILE_COLUMN_FILLNA = {
+_EXCELFILE_COLUMN_FILLNA = {
     "Position": "",
     "Last Name": "",
     "First Name": "",
@@ -41,111 +47,9 @@ EXCELFILE_COLUMN_FILLNA = {
     "Notes": "",
 }
 
-# Valid provider positions and associated information.
-# TODO: Put in external JSON file?
-POSITIONS = {
-    "Tutor": {
-        "required": [
-            "Last Name",
-            "First Name",
-            "Class Tutored",
-            "Month",
-            "Day",
-            "Start Time",
-            "End Time",
-            "Duration",
-        ],
-    },
-    "Learning Strategist": {
-        "required": [
-            "Last Name",
-            "First Name",
-            "Month",
-            "Day",
-            "Start Time",
-            "End Time",
-            "Duration",
-        ]
-    },
-    "Training": {"required": ["Month", "Day", "Start Time", "End Time", "Duration"]},
-    "Matching Meeting": {
-        "required": ["Month", "Day", "Start Time", "End Time", "Duration"]
-    },
-    "Coordinator": {"required": ["Month", "Day", "Duration"]},
-    "Alternative Text": {
-        "required": ["Month", "Day", "Year", "Start Time", "End Time", "Duration"]
-    },
-    "Exam Reader": {
-        "required": [
-            "Last Name",
-            "First Name",
-            "Class Tutored",
-            "Month",
-            "Day",
-            "Start Time",
-            "End Time",
-            "Duration",
-        ]
-    },
-    "Lab Assistant": {
-        "required": [
-            "Last Name",
-            "First Name",
-            "Class Tutored",
-            "Month",
-            "Day",
-            "Start Time",
-            "End Time",
-            "Duration",
-        ]
-    },
-    "Other": {"required": ["Notes"]},
-}
 
-
-def concatenate_pay_periods(
-    workbook, header=EXCELFILE_HEADER_ROW, usecols=None, dtype=str, fillna=None,
-):
-    """Concatenate all pay period timesheets into one DataFrame.
-
-    Args:
-        workbook: A Pandas ExcelFile
-        header: 0-indexed row number of column headings
-        usecols: List of column names to use
-        dtype: Type, list of types, or dictionary of column names and types
-
-    Returns:
-        A DataFrame containing all entries from all pay periods, with added columns for
-        originating pay period and 1-indexed row.
-    """
-    if usecols is None:
-        usecols = EXCELFILE_USE_COLUMNS
-    if fillna is None:
-        fillna = EXCELFILE_COLUMN_FILLNA
-
-    # Any sheet with a name starting with a month is a pay period.
-    pay_period_names = [
-        name for name in workbook.sheet_names if name.lower().startswith(MONTH_PREFIXES)
-    ]
-    pay_period_sheets = []
-
-    for name in pay_period_names:
-        sheet = workbook.parse(name, header=header, usecols=usecols)
-        # The timesheet has irrelevant entries in rows 0-12. workbook.parse will
-        # properly ignore the entries, but will produce empty rows if the data columns
-        # are empty. Also, filled rows can be interspersed with filled rows.
-        sheet.dropna(how="all", inplace=True)
-        sheet.fillna(fillna, inplace=True)
-
-        # Record original row number and pay period for error messages. The +1 is
-        # necessary because Excel rows are 1-indexed while Pandas DataFrames are
-        # 0-indexed.
-        sheet["_row_in_sheet"] = sheet.index + header + 1
-        sheet["_pay_period"] = name
-
-        pay_period_sheets.append(sheet)
-
-    return pd.concat(pay_period_sheets, ignore_index=True)
+########################################################################################
+# Error detection
 
 
 def _errors_in_row(row, matches=None):
@@ -169,8 +73,8 @@ def _errors_in_row(row, matches=None):
 
     # The DataFrame records the original pay period and row.
     errors_df = pd.DataFrame(errors, columns=["error"])
-    errors_df.insert(0, "pay_period", row["_pay_period"])
-    errors_df.insert(1, "row_in_sheet", row["_row_in_sheet"])
+    errors_df.insert(0, "_pay_period_name", row["_pay_period_name"])
+    errors_df.insert(1, "_row_in_sheet", row["_row_in_sheet"])
 
     return errors_df
 
@@ -188,7 +92,7 @@ def _errors_position(row):
 
     if position == "":
         return ["No position given."]
-    elif position not in POSITIONS:
+    elif position not in _POSITIONS:
         return [f"Unrecognized position: {position}."]
     else:
         return []
@@ -214,9 +118,9 @@ def _errors_date(row):
         errors.append("No month given.")
     else:
         try:
-            # MONTH_NAMES[0] is "", but month is not "" in this branch, so
-            # MONTH_NAMES.index isn't 0.
-            month_num = MONTH_NAMES.index(month)
+            # _MONTH_NAMES[0] is "", but month is not "" in this branch, so
+            # _MONTH_NAMES.index isn't 0.
+            month_num = _MONTH_NAMES.index(month)
         except ValueError:
             errors.append(f"Invalid month: {month}.")
 
@@ -246,6 +150,7 @@ def _errors_match(row, matches):
 
     Args:
         row: A timesheet row as a Pandas Series
+        matches: (optional) A list of students matched with the provider
 
     Returns:
         List (possibly empty) of error description strings.
@@ -259,3 +164,70 @@ def _errors_match(row, matches):
         return [f"No record of match with {first} {last}."]
     else:
         return []
+
+
+########################################################################################
+# Timesheet processing
+
+
+def concatenate_pay_periods(
+    workbook, header=_EXCELFILE_HEADER_ROW, usecols=None, dtype=str, fillna=None,
+):
+    """Concatenate all pay period timesheets into one DataFrame.
+
+    Args:
+        workbook: A Pandas ExcelFile
+        header: 0-indexed row number of column headings
+        usecols: List of column names to use
+        dtype: Type, list of types, or dictionary of column names and types
+
+    Returns:
+        A DataFrame containing all entries from all pay periods, with added columns for
+        originating pay period and 1-indexed row.
+    """
+    if usecols is None:
+        usecols = _EXCELFILE_USE_COLUMNS
+    if fillna is None:
+        fillna = _EXCELFILE_COLUMN_FILLNA
+
+    pay_period_names = [name for name in workbook.sheet_names if name in _PAY_PERIODS]
+    pay_period_sheets = []
+
+    for name in pay_period_names:
+        sheet = workbook.parse(name, header=header, usecols=usecols)
+        # The timesheet has irrelevant entries in rows 0-12. workbook.parse will
+        # properly ignore the entries, but will produce empty rows if the data columns
+        # are empty. Also, filled rows can be interspersed with filled rows.
+        sheet.dropna(how="all", inplace=True)
+        sheet.fillna(fillna, inplace=True)
+
+        # Record original row number and pay period for error messages. The +1 is
+        # necessary because Excel rows are 1-indexed while Pandas DataFrames are
+        # 0-indexed.
+        sheet["_row_in_sheet"] = sheet.index + header + 1
+        sheet["_pay_period_name"] = name
+        sheet["_pay_period_end"] = datetime.date(
+            _CURRENT_YEAR, *_PAY_PERIODS[name]["last"]
+        )
+        sheet["_pay_period_end"] = pd.to_datetime(sheet["_pay_period_end"])
+
+        pay_period_sheets.append(sheet)
+
+    return pd.concat(pay_period_sheets, ignore_index=True)
+
+
+def errors(timesheet, matches=None):
+    """All errors in a timesheet.
+
+    Args:
+        timesheet: A concatenated, but not processed, timesheet
+
+    Returns:
+        DataFrame with columns '_pay_period_name', '_row_in_sheet', and 'error'
+    """
+    return pd.concat(
+        # concat requires an iterable, so the Series returned by agg must be converted
+        # to something like a list.
+        timesheet.agg(_errors_in_row, axis=1, matches=matches).tolist(),
+        ignore_index=True,
+    )

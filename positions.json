@@ -1,0 +1,89 @@
+{
+    "Tutor": {
+        "required": [
+            "Last Name",
+            "First Name",
+            "Class Tutored",
+            "Month",
+            "Day",
+            "Start Time",
+            "End Time",
+            "Duration"
+        ]
+    },
+    "Learning Strategist": {
+        "required": [
+            "Last Name",
+            "First Name",
+            "Month",
+            "Day",
+            "Start Time",
+            "End Time",
+            "Duration"
+        ]
+    },
+    "Training": {
+        "required": [
+            "Month",
+            "Day",
+            "Start Time",
+            "End Time",
+            "Duration"
+        ]
+    },
+    "Matching Meeting": {
+        "required": [
+            "Month",
+            "Day",
+            "Start Time",
+            "End Time",
+            "Duration"
+        ]
+    },
+    "Coordinator": {
+        "required": [
+            "Month",
+            "Day",
+            "Duration"
+        ]
+    },
+    "Alternative Text": {
+        "required": [
+            "Month",
+            "Day",
+            "Year",
+            "Start Time",
+            "End Time",
+            "Duration"
+        ]
+    },
+    "Exam Reader": {
+        "required": [
+            "Last Name",
+            "First Name",
+            "Class Tutored",
+            "Month",
+            "Day",
+            "Start Time",
+            "End Time",
+            "Duration"
+        ]
+    },
+    "Lab Assistant": {
+        "required": [
+            "Last Name",
+            "First Name",
+            "Class Tutored",
+            "Month",
+            "Day",
+            "Start Time",
+            "End Time",
+            "Duration"
+        ]
+    },
+    "Other": {
+        "required": [
+            "Notes"
+        ]
+    }
+}
