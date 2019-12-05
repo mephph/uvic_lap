@@ -18,7 +18,7 @@ with open("positions.json") as f:
 
 # calendar.month_name is a calendar.py-specific type which only supports __get__ and
 # __len__, not searching.
-_MONTH_NAMES = tuple(calendar.month_name)
+_MONTH_NAMES = tuple(map(str.lower, calendar.month_name))
 _CURRENT_YEAR = datetime.date.today().year
 
 # Default arguments for Pandas ExcelFile.parse.
@@ -92,7 +92,7 @@ def _errors_position(row):
 
     if position == "":
         return ["No position given."]
-    elif position not in _POSITIONS:
+    elif position.lower() not in _POSITIONS:
         return [f"Unrecognized position: {position}."]
     else:
         return []
@@ -120,9 +120,9 @@ def _errors_date(row):
         try:
             # _MONTH_NAMES[0] is "", but month is not "" in this branch, so
             # _MONTH_NAMES.index isn't 0.
-            month_num = _MONTH_NAMES.index(month)
+            month_num = _MONTH_NAMES.index(month.lower())
         except ValueError:
-            errors.append(f"Invalid month: {month}.")
+            errors.append(f"Invalid month (must be full name): {month}.")
 
     if day == "":
         errors.append("No day given.")
@@ -138,7 +138,13 @@ def _errors_date(row):
         year = datetime.date.today().year
 
         try:
-            datetime.date(year, month_num, day_num)
+            date = datetime.date(year, month_num, day_num)
+
+            if date > row["_pay_period_end"]:
+                errors.append(
+                    f"Date ({month}, {day}) is past end of pay period "
+                    "{row['_pay_period_name']}."
+                )
         except ValueError:
             errors.append(f"Day is out of range for month: {month} {day_num}, {year}.")
 

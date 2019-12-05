@@ -8,4 +8,5 @@ data/
 
 # vim
 *.swp
+*.swo
 tags
