@@ -9,7 +9,8 @@
             "Start Time",
             "End Time",
             "Duration"
-        ]
+        ],
+        "forbidden": []
     },
     "Learning Strategist": {
         "required": [
@@ -20,6 +21,9 @@
             "Start Time",
             "End Time",
             "Duration"
+        ],
+        "forbidden": [
+            "Class Tutored"
         ]
     },
     "Training": {
@@ -29,6 +33,11 @@
             "Start Time",
             "End Time",
             "Duration"
+        ],
+        "forbidden": [
+            "Last Name",
+            "First Name",
+            "Class Tutored"
         ]
     },
     "Matching Meeting": {
@@ -38,6 +47,11 @@
             "Start Time",
             "End Time",
             "Duration"
+        ],
+        "forbidden": [
+            "Last Name",
+            "First Name",
+            "Class Tutored"
         ]
     },
     "Coordinator": {
@@ -45,6 +59,13 @@
             "Month",
             "Day",
             "Duration"
+        ],
+        "forbidden": [
+            "Last Name",
+            "First Name",
+            "Class Tutored",
+            "Start Time",
+            "End Time"
         ]
     },
     "Alternative Text": {
@@ -55,6 +76,11 @@
             "Start Time",
             "End Time",
             "Duration"
+        ],
+        "forbidden": [
+            "Last Name",
+            "First Name",
+            "Class Tutored"
         ]
     },
     "Exam Reader": {
@@ -67,7 +93,8 @@
             "Start Time",
             "End Time",
             "Duration"
-        ]
+        ],
+        "forbidden": []
     },
     "Lab Assistant": {
         "required": [
@@ -79,10 +106,16 @@
             "Start Time",
             "End Time",
             "Duration"
-        ]
+        ],
+        "forbidden": []
     },
     "Other": {
         "required": [
+            "Month",
+            "Day",
+            "Start Time",
+            "End Time",
+            "Duration",
             "Notes"
         ]
     }
