@@ -5,8 +5,10 @@ import calendar
 import datetime
 import json
 import logging
+import os.path
 import pathlib
 import re
+from pickle import UnpicklingError
 
 import numpy as np
 import pandas as pd
@@ -237,12 +239,26 @@ def concat_pay_periods(workbook):
 def load_timesheet(path):
     """Load a timesheet Excel file into a DataFrame.
 
+    The timesheet DataFrame will be pickled after loading, and the pickled version will
+    be loaded if it is newer than the Excel file.
+
     Args:
         path: String path of Excel file
 
     Return:
         Pandas DataFrame containing all timesheet entries.
     """
+    xlsx_path = pathlib.Path(path)
+    pickle_path = xlsx_path.with_suffix(".pkl")
+
+    # Load the pickled version if it exists and isn't older.
+    if os.path.exists(pickle_path):
+        if os.path.getmtime(pickle_path) >= os.path.getmtime(xlsx_path):
+            try:
+                return pd.read_pickle(pickle_path)
+            except UnpicklingError:
+                pass
+
     timesheet = concat_pay_periods(pd.ExcelFile(path))
 
     # Add year and provider name columns to the DataFrame.
@@ -261,6 +277,8 @@ def load_timesheet(path):
     except ValueError:
         logging.error(f"Unexpected filename format: {path.stem}")
         timesheet["provider"] = np.nan
+
+    timesheet.to_pickle(pickle_path)
 
     return timesheet
 
@@ -299,7 +317,7 @@ def parse_timesheet(ts):
 
     # The times will always be on the same day, so the duration can be computed even if
     # the date is missing or invalid.
-    parsed["duration"] = __round_to_multiple(
+    parsed["duration"] = _round_to_multiple(
         # Convert to NumPy datetime for easy subtraction. The order must be 'start',
         # 'end' because DataFrame.diff goes in column order.
         parsed[["start", "end"]].dropna().astype("datetime64[ns]")
