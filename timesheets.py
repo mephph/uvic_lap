@@ -137,7 +137,8 @@ def _normalize_time(time):
         time: A datetime.time
 
     Return:
-        A string like '4:15 PM' or numpy.nan"""
+        A string like '4:15 PM' or numpy.nan
+    """
     try:
         return time.strftime("%I:%M %p").lstrip("0")
     except (TypeError, AttributeError):
@@ -152,7 +153,8 @@ def _round_to_multiple(x, base=1):
         base: Round to nearest multiple of this
 
     Return:
-        Nearest multiple"""
+        Nearest multiple
+    """
     return round(x / base) * base
 
 
@@ -290,10 +292,13 @@ def parse_timesheet(ts):
         ts: A timesheet DataFrame
 
     Return:
-        DataFrame with parsed values"""
+        DataFrame with parsed entries
+    """
     parsed = pd.DataFrame(index=ts.index)
 
     parsed["month"] = ts["month"].dropna().apply(_parse_month)
+
+    # Coerce errors to NaN.
     parsed["day"] = pd.to_numeric(ts["day"], errors="coerce")
 
     parsed["date"] = (
@@ -319,7 +324,7 @@ def parse_timesheet(ts):
     # the date is missing or invalid.
     parsed["duration"] = _round_to_multiple(
         # Convert to NumPy datetime for easy subtraction. The order must be 'start',
-        # 'end' because DataFrame.diff goes in column order.
+        # 'end' because DataFrame.diff does current - previous.
         parsed[["start", "end"]].dropna().astype("datetime64[ns]")
         # Subtract along rows. There are only two columns so the difference is in the
         # second.
