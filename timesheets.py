@@ -1,61 +1,57 @@
-""""
-Utilities for CAL timesheets
+"""
+Utilities for LAP timesheets
 """
 import calendar
-import datetime as dt
+import datetime
 import json
+import logging
+import pathlib
+import re
 
-import dateparser
+import numpy as np
 import pandas as pd
+
+__all__ = ["concat_pay_periods", "load_timesheet", "parse_timesheet"]
 
 ########################################################################################
 # Module constants and defaults
 
-with open("pay_periods.json") as f:
+with open("pay_periods.json", "r") as f:
     _PAY_PERIODS = json.load(f)
 
-with open("positions.json") as f:
+with open("positions.json", "r") as f:
     _POSITIONS = json.load(f)
 
-# calendar.month_name is a calendar.py-specific type which only supports __get__ and
-# __len__, not searching.
-_MONTH_NAMES = tuple(map(str.lower, calendar.month_name))
-_TODAY = dt.date.today()
-_CURRENT_YEAR = dt.date.today().year
+# calendar.month_abbr is a calendar.py-specific type which doesn't support searching.
+_MONTH_ABBRS = tuple(map(str.lower, calendar.month_abbr))
+_TODAY = datetime.date.today()
 
-# Default arguments for Pandas ExcelFile.parse and related functions.
-_EXCEL_HEADER_ROW = 1
-_EXCEL_USE_COLUMNS = [
-    "Position",
-    "Last Name",
-    "First Name",
-    "Class Tutored",
-    "Month",
-    "Day",
-    "Start Time",
-    "End Time",
-    "Duration",
-    "Notes",
-]
-_EXCEL_COLUMN_TYPES = {
-    "Duration": float,
-}
-_EXCEL_COLUMN_FILLNA = {
-    "Position": "",
-    "Last Name": "",
-    "First Name": "",
-    "Class Tutored": "",
-    "Month": "",
-    "Start Time": "",
-    "End Time": "",
-    "Notes": "",
-}
+# Pattern to match recognizable time strings and extract their relevant components. The
+# second section must be explicitly repeated (instead of using {0,2}) to give all
+# mathces the same number of groups, and to make sure group 2 always means minute, etc.
+#
+# Time strings in LAP timesheets are varied. All of the following have come up and are
+# good enough to be understood: 4, 4:15, 4:15:, 4:15:00pm, 4h15, 4PM, 4p, 4:15 Pm,
+# 16:15, 16:15:
+_TIME_REGEX = re.compile(
+    # 1 or 2 digits. Capture the digits in group 1.
+    r"(\d{1,2})"
+    # A non-digit separator (like h or :) and two digits. Capture the digits in group 2.
+    r"(?:[^\d](\d{2}))?"
+    # A non-digit separator (like h or :) and two digits. Capture the digits in group 3.
+    r"(?:[^\d](\d{2}))?"
+    # Non-digit, non-letter separators
+    r"[^\d\w]*?"
+    # A or P, uppercase or lowercase and optional M. Capture the A or P in group 4.
+    r"(?:([AaPp])[Mm]?)?"
+)
 
+# Internal-use names for columns.
 _COLUMN_SHORT_NAMES = {
     "Position": "position",
     "Last Name": "last",
     "First Name": "first",
-    "Class Tutored": "course",
+    "Class Tutored": "class",
     "Month": "month",
     "Day": "day",
     "Start Time": "start",
@@ -65,300 +61,256 @@ _COLUMN_SHORT_NAMES = {
 }
 _COLUMN_LONG_NAMES = {v: k for k, v in _COLUMN_SHORT_NAMES.items()}
 
-# Convert positions to lower case and required columns to short names.
-_POSITIONS = {k.lower(): v for k, v in _POSITIONS.items()}
-for position, data in _POSITIONS.items():
-    data["required"] = list(map(_COLUMN_SHORT_NAMES.get, data["required"]))
+# Arguments for Pandas ExcelFile.parse and related Excel functions.
+_EXCEL = {
+    # 0-indexed row of sheet which contains column names.
+    "header": 1,
+    # List of column names to use.
+    "usecols": [
+        "Position",
+        "Last Name",
+        "First Name",
+        "Class Tutored",
+        "Month",
+        "Day",
+        "Start Time",
+        "End Time",
+        "Duration",
+        "Notes",
+    ],
+}
+
 
 ########################################################################################
-# Error detection
+# Utility functions
 
 
-def _parse_time(string):
-    """Try to parse a string as a time.
+def _int_or_zero(x):
+    """Convert a string to an int, or None to 0.
+
+    Args:
+        x: A string or None
+
+    Return:
+        int(x) if x is a string or 0 if x is None.
+    """
+    if x is not None:
+        return int(x)
+    else:
+        return 0
+
+
+def _str_to_time(string):
+    """Parse a string representing a time of day.
 
     Args:
         string: Any string
 
-    Returns:
-        A datetime.datetime object or raises a ValueError"""
-    fixed = string
-    # Replace 'A' with 'AM'
-    if fixed[-1] in ["A", "a", "P", "p"]:
-        fixed = fixed + "m"
-    # Replace '4' with '4:00'
-    elif len(fixed) <= 2:
-        try:
-            int(fixed)
-            fixed = fixed + ":00"
-        except ValueError:
-            pass
-
-    parsed = dateparser.parse(fixed)
-
-    # DateParser sometimes returns None if the string is invalid, and strange strings
-    # like '3:30:PM' can be interpreted as dates in 1900.
-    if parsed is None or parsed.year < 2000:
-        raise ValueError(f"DateParser failed to parse time: {string}")
-
-    return parsed
-
-
-def _compute_duration(start, end):
-    if start > end:
-        start += pd.to_timedelta("12:00:00")
-
-    return (end - start).seconds / 3600
-
-
-def _errors_in_row(row, matches=None):
-    """Find all errors in a timesheet row.
-
-    Args:
-        row: A timesheet row as a Pandas Series
-        matches: (optional) List of (last, first) names the provider is matched with
-
-    Returns:
-        A DataFrame with columns (pay_period, row_in_sheet, error)
+    Return:
+        A datetime.time or None if the string isn't a valid time.
     """
-    errors = []
-
-    for checker in [_errors_position, _errors_date_time]:
-        errors.extend(checker(row))
-
-    # Checking the match is a special case as it requires a list of matches.
-    if matches is not None:
-        errors.extend(_errors_match(row, matches))
-
-    # The DataFrame records the original pay period and row.
-    errors_df = pd.DataFrame(errors, columns=["error"])
-    errors_df.insert(0, "_pay_period", row["_pay_period"])
-    errors_df.insert(1, "_row_in_sheet", row["_row_in_sheet"])
-
-    return errors_df
-
-
-def _errors_position(row):
-    """Check for errors in Position column.
-
-    Args:
-        row: A timesheet row as a Pandas Series
-
-    Returns:
-        List (possibly empty) of error description strings.
-    """
-    errors = []
-    position = row["position"].lower()
-
-    if position == "":
-        errors.append("No position given.")
-    elif position not in _POSITIONS:
-        errors.append("Unrecognized position: {position}.".format(**row))
-    else:
-        # The short names of the columns required for the position.
-        required = row[_POSITIONS[position]["required"]]
-        # Which of the required columns are missing or blank.
-        missing = required.isna() | (required == "")
-
-        for column in map(_COLUMN_LONG_NAMES.get, required[missing].index):
-            errors.append(f"Missing required entry: {column}")
-
-    return errors
-
-
-def _errors_date_time(row):
-    """Check for errors in the entry's date, time, and duration.
-
-    Args:
-        row: A timesheet row as a Pandas Series
-
-    Returns:
-        List (possibly empty) of error description strings.
-    """
-    errors = []
-    month = False
-    day = False
-    start = False
-    end = False
-    duration = False
-
-    # Date and time can be invalid in quite a few ways, and some checks only make sense
-    # if some other values are present and valid. This would be a great place for a
-    # Maybe monad.
-
-    # Start with basic type casting.
     try:
-        month = _MONTH_NAMES.index(row["month"].lower())
-    except ValueError:
-        errors.append("Invalid month (must be full name): {month}.".format(**row))
+        match = _TIME_REGEX.fullmatch(string.strip())
+    except (TypeError, AttributeError):
+        return np.nan
 
-    try:
-        day = int(row["day"])
-    except ValueError:
-        errors.append("Invalid day (must be a number): {day}.".format(**row))
+    if match is not None:
+        # Groups are hour, minute, second, a/p.
+        groups = match.groups()
+        # The second, third, and fourth groups could be None if string is '4'.
+        hour, minute, second = map(_int_or_zero, groups[0:3])
 
-    if row["start"]:
-        try:
-            start = _parse_time(row["start"])
-        except ValueError:
-            errors.append("Invalid start time: {start}.".format(**row))
+        if groups[3] is not None and groups[3].lower() == "p" and hour < 12:
+            hour += 12
 
-    if row["end"]:
-        try:
-            end = _parse_time(row["end"])
-        except ValueError:
-            errors.append("Invalid end time: {end}.".format(**row))
+        return datetime.time(hour, minute, second)
 
-    if row["duration"]:
-        try:
-            duration = float(row["duration"])
-        except ValueError:
-            errors.append(f"Invalid duration (must be a number): {row['duration']}.")
-
-    # More complicated validity checks
-    if month and day:
-        try:
-            date = dt.date(_CURRENT_YEAR, month, day)
-
-            if date > row["_period_end"]:
-                errors.append(
-                    "Date ({month} {day}) is past end of pay period "
-                    "({_pay_period}).".format(**row)
-                )
-        except ValueError:
-            errors.append(
-                "Day is out of range for month: {month} {day}, {year}.".format(
-                    year=_CURRENT_YEAR, **row
-                )
-            )
-
-    if duration and duration <= 0:
-        errors.append("Invalid duration (must be postive): {duration}.".format(**row))
-
-    if start and end and start > end:
-        # If 12-hour time is used without AM/PM then 1:30 is parsed as 1:30 AM and give
-        # a negative duration. Assume they meant PM if this happens. If this correction
-        # isn't right, the computed duration probably won't match the given duration so
-        # there will still be an error.
-        errors.append(
-            "Start ({start}) is after end ({end}). Assuming end time is PM.".format(
-                **row
-            )
-        )
-        end += dt.timedelta(hours=12)
-
-    if start and end and duration:
-        computed_duration = (end - start).seconds / 3600
-
-        # If the duration is computed with a formula in the sheet then duration and
-        # computed_duration can be slightly different. This is probably due to how
-        # Pandas handles formulas.
-        if abs(duration - computed_duration) > 0.1:
-            errors.append(
-                "Duration ({duration}) doesn't match times ({start} - {end})".format(
-                    **row
-                )
-            )
-
-    return errors
+    return np.nan
 
 
-def _errors_match(row, matches):
-    """Check if the provider is matched with the student.
+def _normalize_time(time):
+    """Time like '4:15 PM'.
 
     Args:
-        row: A timesheet row as a Pandas Series
-        matches: (optional) A list of students matched with the provider
+        time: A datetime.time
 
-    Returns:
-        List (possibly empty) of error description strings.
+    Return:
+        A string like '4:15 PM' or numpy.nan"""
+    try:
+        return time.strftime("%I:%M %p").lstrip("0")
+    except (TypeError, AttributeError):
+        return np.nan
+
+
+def _round_to_multiple(x, base=1):
+    """Round to the nearest multiple.
+
+    Args:
+        x: Number to round
+        base: Round to nearest multiple of this
+
+    Return:
+        Nearest multiple"""
+    return round(x / base) * base
+
+
+########################################################################################
+# Entry parsing
+
+
+def _parse_month(string):
+    """Parse a string representing a month into an int 1-12.
+
+    Only the first three characters of the string are considered, so 'Feb', 'febr', and
+    'february' will all return 2.
+
+    Args:
+        string: Any string
+
+    Return:
+        An int 1-12 or numpy.nan if the string is invalid.
     """
-    # Only check the match if the full name is given. If it isn't the required-fields
-    # check will flag the error.
-    if row["last"] and row["first"] and (row["last"], row["first"]) not in matches:
-        return ["No record of match with {first} {last}.".format(**row)]
-    else:
-        return []
+    try:
+        # Three characters are enough to identify any month. The slice and lower call
+        # can be handled by Series.str.slice and Series.str.lower, but vectorization
+        # would be more complicated.
+        return _MONTH_ABBRS.index(string[:3].lower())
+    except ValueError:
+        return np.nan
+
+
+def _parse_date(series):
+    """Parse a Pandas Series with year, month, and day entries into a datetime.date.
+
+    Args:
+        series: A Pandas Series year, month, and day entries.
+
+    Return:
+        A datetime.date or pandas.NaT if the year, month, and day year aren't valid.
+    """
+    try:
+        return datetime.date(**series)
+    except (TypeError, ValueError):
+        return pd.NaT
 
 
 ########################################################################################
 # Timesheet processing
 
 
-def _concatenate_pay_periods(workbook, *, usecols, dtype=None, fillna=None):
-    """Concatenate all pay period timesheets into one DataFrame.
+def concat_pay_periods(workbook):
+    """Concatenate all pay periods into one DataFrame.
+
+    Entries are not processed or cast into other types.
 
     Args:
-        workbook: Pandas ExcelFile containing the timesheets
-        usecols: List of column names
-        dtype: Type, list of types, or dictionary of column names and types
-        fillna: Dictionary of original column names and replacement values
+        workbook: A Pandas ExcelFile
 
-    Returns:
-        A DataFrame containing all entries from all pay periods, with added columns for
-        originating pay period and 1-indexed row.
+    Return:
+        DataFrame with columns in _EXCEL["usecols"], 'original_line', and '_period'.
     """
     period_names = [name for name in workbook.sheet_names if name in _PAY_PERIODS]
     period_sheets = []
 
     for name in period_names:
         sheet = workbook.parse(
-            name, header=_EXCEL_HEADER_ROW, usecols=usecols, dtype=dtype
+            name, header=_EXCEL["header"], usecols=_EXCEL["usecols"], dtype=str
         )
+
         # The timesheet has irrelevant entries in rows 0-12. workbook.parse will
         # properly ignore the entries, but will produce empty rows if the data columns
-        # are empty. Also, filled rows can be interspersed with filled rows.
+        # are empty. Also, filled rows can be interspersed with unfilled rows.
         sheet.dropna(how="all", inplace=True)
-
-        if fillna:
-            sheet.fillna(fillna, inplace=True)
-
         sheet.rename(columns=_COLUMN_SHORT_NAMES, inplace=True)
 
-        # Record original row number and pay period for error messages. The +2 is
+        # Record original line number and pay period for error messages. The +2 is
         # necessary because Excel rows are 1-indexed while Pandas DataFrames are
         # 0-indexed and the first row of the DataFrame is one after the header.
-        sheet["_row_in_sheet"] = sheet.index + _EXCEL_HEADER_ROW + 2
-        sheet["_pay_period"] = name
-        sheet["_period_end"] = dt.date(_CURRENT_YEAR, *_PAY_PERIODS[name]["last"])
-        sheet["_period_end"] = pd.to_datetime(sheet["_period_end"])
+        sheet["_original_line"] = sheet.index + _EXCEL["header"] + 2
+        sheet["_period"] = name
 
         period_sheets.append(sheet)
 
     return pd.concat(period_sheets, ignore_index=True)
 
 
-def errors(timesheet, matches=None):
-    """All errors in a timesheet.
+def load_timesheet(path):
+    """Load a timesheet Excel file into a DataFrame.
 
     Args:
-        timesheet: A concatenated, but not processed, timesheet
+        path: String path of Excel file
 
-    Returns:
-        DataFrame with columns '_pay_period', '_row_in_sheet', and 'error'
+    Return:
+        Pandas DataFrame containing all timesheet entries.
     """
-    return pd.concat(
-        # concat requires an iterable, so the Series returned by agg must be converted
-        # to something like a list.
-        timesheet.agg(_errors_in_row, axis=1, matches=matches).tolist(),
-        ignore_index=True,
-    )
+    timesheet = concat_pay_periods(pd.ExcelFile(path))
+
+    # Add year and provider name columns to the DataFrame.
+    try:
+        # Timesheet filenames are SemesterYear_PAYROLL_LastName_FirstName_VNumber.xlsx.
+        semester, _, last, first, vnumber = pathlib.Path(path).stem.split("_")
+        timesheet["provider"] = f"{first} {last}"
+
+        try:
+            # Semester part of filename is like 'Fall2019'.
+            year = int(semester[-4:])
+            timesheet["year"] = year
+        except ValueError:
+            logging.error(f"Unexpected semester format in filename: {semester}")
+            timesheet["year"] = np.nan
+    except ValueError:
+        logging.error(f"Unexpected filename format: {path.stem}")
+        timesheet["provider"] = np.nan
+
+    return timesheet
 
 
-def load(filename, *, usecols=None, dtype=str, fillna=None):
-    """Load the timesheets in an Excel workbook into a DataFrame.
+def parse_timesheet(ts):
+    """Parse timesheet entries.
 
     Args:
-        filename:
-        usecols:
-        dtype:
-        fillna:"""
-    if usecols is None:
-        usecols = _EXCEL_USE_COLUMNS
-    if fillna is None:
-        fillna = _EXCEL_COLUMN_FILLNA
+        ts: A timesheet DataFrame
 
-    workbook = pd.ExcelFile(filename)
-    return _concatenate_pay_periods(
-        workbook, usecols=usecols, dtype=dtype, fillna=fillna
+    Return:
+        DataFrame with parsed values"""
+    parsed = pd.DataFrame(index=ts.index)
+
+    parsed["month"] = ts["month"].dropna().apply(_parse_month)
+    parsed["day"] = pd.to_numeric(ts["day"], errors="coerce")
+
+    parsed["date"] = (
+        # Combine year, month, and day columns.
+        pd.concat([ts["year"], parsed[["month", "day"]]], axis=1)
+        .dropna()
+        # Cast to int in case month or day were floats because of NaN entries.
+        .astype(int)
+        # Convert to datetime.date.
+        .apply(_parse_date, axis=1)
+        .dropna()
+        # Put in YYYY-MM-DD form.
+        .apply(datetime.date.isoformat)
     )
+
+    parsed["start"] = ts["start"].apply(_str_to_time).apply(_normalize_time)
+    parsed["start_dt"] = pd.to_datetime(parsed["date"] + " " + parsed["start"])
+
+    parsed["end"] = ts["end"].apply(_str_to_time).apply(_normalize_time)
+    parsed["end_dt"] = pd.to_datetime(parsed["date"] + " " + parsed["end"])
+
+    # The times will always be on the same day, so the duration can be computed even if
+    # the date is missing or invalid.
+    parsed["duration"] = __round_to_multiple(
+        # Convert to NumPy datetime for easy subtraction. The order must be 'start',
+        # 'end' because DataFrame.diff goes in column order.
+        parsed[["start", "end"]].dropna().astype("datetime64[ns]")
+        # Subtract along rows. There are only two columns so the difference is in the
+        # second.
+        .diff(axis=1).iloc[:, 1]
+        # Convert to fractional hours and round to nearest multiple of 15 minutes.
+        .dt.seconds / 3600,
+        0.25,
+    )
+
+    return parsed[
+        ["month", "day", "date", "start", "end", "start_dt", "end_dt", "duration"]
+    ]
