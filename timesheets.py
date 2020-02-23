@@ -48,20 +48,6 @@ _TIME_REGEX = re.compile(
     r"(?:([AaPp])[Mm]?)?"
 )
 
-# Internal-use names for columns.
-_COLUMN_SHORT_NAMES = {
-    "Position": "position",
-    "Last Name": "last",
-    "First Name": "first",
-    "Class Tutored": "class",
-    "Month": "month",
-    "Day": "day",
-    "Start Time": "start",
-    "End Time": "end",
-    "Duration": "duration",
-    "Notes": "notes",
-}
-
 # Arguments for Pandas ExcelFile.parse and related Excel functions.
 _EXCEL = {
     # 0-indexed row of sheet which contains column names.
@@ -79,6 +65,19 @@ _EXCEL = {
         "Duration",
         "Notes",
     ],
+    # Internal-use names for columns.
+    "rename": {
+        "Position": "position",
+        "Last Name": "last",
+        "First Name": "first",
+        "Class Tutored": "class",
+        "Month": "month",
+        "Day": "day",
+        "Start Time": "start",
+        "End Time": "end",
+        "Duration": "duration",
+        "Notes": "notes",
+    },
 }
 
 
@@ -86,29 +85,29 @@ _EXCEL = {
 # Utility functions
 
 
-def _int_or_zero(x):
-    """Convert a string to an int, or None to 0.
+def _str_to_int(x):
+    """Convert a string to an int or pd.NA.
 
     Args:
-        x: A string or None
+        x: A string
 
     Return:
-        int(x) if x is a string or 0 if x is None.
+        int(x) or pd.NA if x can't be parsed as a string.
     """
-    if x is not None:
+    try:
         return int(x)
-    else:
-        return 0
+    except (ValueError, TypeError):
+        return pd.NA
 
 
-def _str_to_time(string):
+def _normalize_time_string(string):
     """Parse a string representing a time of day.
 
     Args:
         string: Any string
 
     Return:
-        A datetime.time or numpy.nan if the string isn't a valid time.
+        A string like '15:45' or pd.NA.
     """
     try:
         match = _TIME_REGEX.fullmatch(string.strip())
@@ -118,39 +117,22 @@ def _str_to_time(string):
 
     if match is not None:
         # Groups are hour, minute, second, a/p. The second, third, and fourth groups
-        groups = match.groups()
         # could be None if string is like '4'.
-        hour, minute, second = map(_int_or_zero, groups[0:3])
+        groups = match.groups()
+        hour, minute, second = [0 if x is None else int(x) for x in groups[0:3]]
 
         # Add 12 hours to times like "1:00 PM"
         if groups[3] is not None and groups[3].lower() == "p" and hour < 12:
             hour += 12
 
         try:
-            return datetime.time(hour, minute, second)
+            return datetime.time(hour, minute, second).strftime("%H:%M")
         # Hour, minute, and second aren't a valid time.
         except ValueError:
             return pd.NA
 
     # String doesn't match regex.
     return pd.NA
-
-
-def _normalize_time(time):
-    """Time like '4:15 PM'.
-
-    Args:
-        time: A datetime.time
-
-    Return:
-        A string like '4:15 PM' or numpy.nan
-    """
-    try:
-        # lstrip('0') removes the leading zero from times like "02:30 PM". There are no
-        # cross-platform directives for the hour with no leading zero.
-        return time.strftime("%I:%M %p").lstrip("0")
-    except (TypeError, AttributeError):
-        return pd.NA
 
 
 def _round_to_multiple(x, base=1):
@@ -188,6 +170,85 @@ def _parse_month(string):
         return _MONTH_ABBRS.index(string[:3].lower())
     except ValueError:
         return pd.NA
+
+
+def _fix_wrong_na(df):
+    """Replace incorrect pd.NA values in-place, preserving dtypes.
+
+    Unpickling pd.NA values results in a different singleton. See
+    https://github.com/pandas-dev/pandas/issues/31847 .
+
+    Args:
+        df: A DataFrame
+    """
+
+    def replace_na(x):
+        if type(x) == type(pd.NA):  # noqa: E721
+            return pd.NA
+        else:
+            return x
+
+    for column in df.columns:
+        fixed = df[column].apply(replace_na)
+        df[column] = fixed.astype(df[column].dtype)
+
+
+########################################################################################
+# Timesheet parsing
+
+
+def parse_position(ts):
+    position = ts["position"].str.lower()
+
+    return position[position.isin(_POSITIONS)]
+
+
+def parse_match(ts):
+    student = ts["first"] + " " + ts["last"]
+    student.name = "student"
+
+    return student
+
+
+def parse_date_and_time(ts):
+    parsed = pd.DataFrame([], index=ts.index)
+
+    parsed["year"] = ts["year"]  # .astype("Int32")
+    parsed["month"] = ts["month"].dropna().apply(_parse_month).astype("Int32")
+    # pd.to_numeric doesn't provide a way to convert non-int values like '1.2' to NA.
+    parsed["day"] = ts["day"].apply(_str_to_int).astype("Int32")
+    # Date in YYYY-MM-DD format.
+    parsed["date"] = (
+        pd.to_datetime(parsed[["year", "month", "day"]].dropna())
+        .dt.strftime("%Y-%m-%d")
+        .astype("string")
+    )
+
+    parsed["start"] = ts["start"].apply(_normalize_time_string).astype("string")
+    parsed["start_dt"] = pd.to_datetime(
+        (parsed["date"] + " " + parsed["start"]).dropna()
+    )
+    parsed["end"] = ts["end"].apply(_normalize_time_string).astype("string")
+    parsed["end_dt"] = pd.to_datetime((parsed["date"] + " " + parsed["end"]).dropna())
+
+    # The times will always be on the same day, so the duration can be computed even if
+    # the date is missing or invalid.
+    parsed["computed_duration"] = (
+        # Convert to NumPy datetime for easy subtraction. The order must be 'start',
+        # 'end' because DataFrame.diff does current - previous.
+        parsed[["start", "end"]].dropna().apply(pd.to_datetime)
+        # Subtract along rows. There are only two columns so the difference is in the
+        # second.
+        .diff(axis=1).iloc[:, 1].dt.seconds
+        # Convert seconds to hours.
+        / 3600
+    )
+
+    return parsed
+
+
+def parse_duration(ts):
+    return pd.to_numeric(ts["duration"], errors="coerce")
 
 
 ########################################################################################
@@ -243,33 +304,34 @@ def duration_not_quarter_hour(ts, parsed):
 def concat_pay_periods(workbook):
     """Concatenate all pay periods into one DataFrame.
 
-    Entries are left as dtype 'object', though Pandas will still silenty convert values
-    in some homogeneous columns.
+    All values from the Excel sheet are converted to string to make parsing and error
+    checks easier and consistent.
 
     Args:
         workbook: A Pandas ExcelFile
 
     Return:
-        DataFrame with columns in _EXCEL["usecols"], 'original_line', and '_period'.
+        DataFrame with columns in _EXCEL["usecols"], 'row', and 'period'
     """
     # The names of all pay period sheet names in the workbook.
     period_names = [name for name in workbook.sheet_names if name in _PAY_PERIODS]
     period_sheets = []
 
     for name in period_names:
-        # Use dtype=object because Pandas sets the dtype of columns containing only
-        # numbers to int or float (even with dtype=object or dtype='object'). Specifying
-        # dtype='string' raises an error with columns of numeric dtype.
-        sheet = workbook.parse(
-            name, header=_EXCEL["header"], usecols=_EXCEL["usecols"], dtype=object
-        )
+        sheet = workbook.parse(name, header=_EXCEL["header"], usecols=_EXCEL["usecols"])
 
         # The timesheet has irrelevant entries in unused columns of early rows.
         # workbook.parse will properly ignore the entries, but will produce empty rows
         # if the data columns are empty. Also, filled rows can be interspersed with
         # unfilled rows.
         sheet.dropna(how="all", inplace=True)
-        sheet.rename(columns=_COLUMN_SHORT_NAMES, inplace=True)
+        sheet.rename(columns=_EXCEL["rename"], inplace=True)
+
+        # Convert all columns to strings. Skip NA so they aren't converted to 'nan'.
+        # astype(str) is necessary first in case the column contains numeric values.
+        for col_name in sheet.columns:
+            column = sheet[col_name]
+            sheet[col_name] = column[column.notna()].apply(str).astype("string")
 
         # Record original row number and pay period for error messages. The +2 is
         # necessary because Excel rows are 1-indexed while Pandas DataFrames are
@@ -292,8 +354,8 @@ def load_timesheet(path, load_pickle=True, save_pickle=True):
 
     Args:
         path: String path of Excel file
-        load_pickle: Whether to load previously pickled version of timesheet
-        save_pickle: Whether to pickle the timesheet once loaded
+        load_pickle: Load perviously pickled version if it is newer
+        save_pickle: Pickle the timesheet once loaded
 
     Return:
         Pandas DataFrame containing all timesheet entries.
@@ -305,7 +367,10 @@ def load_timesheet(path, load_pickle=True, save_pickle=True):
     if load_pickle and os.path.exists(pickle_path):
         if os.path.getmtime(pickle_path) >= os.path.getmtime(xlsx_path):
             try:
-                return pd.read_pickle(pickle_path)
+                timesheet = pd.read_pickle(pickle_path)
+                _fix_wrong_na(timesheet)
+
+                return timesheet
             except UnpicklingError:
                 logging.error(f"Couldn't unpickle {pickle_path}. Loading original.")
 
@@ -362,49 +427,8 @@ def parse_timesheet(ts):
     Return:
         DataFrame with parsed entries
     """
-    parsed = pd.DataFrame(index=ts.index)
-
-    # name will be NaN if first or last are NaN.
-    parsed["student"] = ts["first"] + " " + ts["last"]
-
-    parsed["month"] = ts["month"].dropna().apply(_parse_month)
-
-    # Coerce errors to NaN.
-    parsed["day"] = pd.to_numeric(ts["day"], errors="coerce")
-
-    # Date in YYYY-MM-DD format.
-    parsed["date"] = pd.to_datetime(
-        pd.concat([ts["year"], parsed[["month", "day"]]], axis=1).dropna().astype(int)
-    ).dt.strftime("%Y-%m-%d")
-
-    # Times in 'HH:MM AM/PM' format.
-    parsed["start"] = ts["start"].apply(_str_to_time).apply(_normalize_time)
-    parsed["end"] = ts["end"].apply(_str_to_time).apply(_normalize_time)
-
-    # Datetimes for sorting and detecting overlapping appointments.
-    parsed["start_dt"] = pd.to_datetime(parsed["date"] + " " + parsed["start"])
-    parsed["end_dt"] = pd.to_datetime(parsed["date"] + " " + parsed["end"])
-
-    # Coerce errors to NaN.
-    parsed["duration"] = pd.to_numeric(ts["duration"], errors="coerce")
-
-    # The times will always be on the same day, so the duration can be computed even if
-    # the date is missing or invalid.
-    parsed["computed_duration"] = (
-        # Convert to NumPy datetime for easy subtraction. The order must be 'start',
-        # 'end' because DataFrame.diff does current - previous.
-        parsed[["start", "end"]].dropna().astype("datetime64[ns]")
-        # Subtract along rows. There are only two columns so the difference is in the
-        # second.
-        .diff(axis=1).iloc[:, 1].dt.seconds
-        # Convert seconds to hours.
-        / 3600
-    )
-
-    # Duration rounded to nearest quarter hour.
-    parsed["rounded_duration"] = _round_to_multiple(parsed["duration"], 0.25)
-
-    return parsed
+    parsers = [parse_position, parse_match, parse_date_and_time, parse_duration]
+    return pd.concat([parse(ts) for parse in parsers], axis=1)
 
 
 def _error_series(row, message_template):
