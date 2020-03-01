@@ -356,8 +356,6 @@ def parse_timesheet(ts):
     Return:
         DataFrame with parsed entries
     """
-    # parsers = [parse_position, parse_student, parse_date_and_time, parse_duration]
-    # return pd.concat([parse(ts) for parse in parsers], axis=1)
     parsed = pd.DataFrame(index=ts.index)
 
     parsed["position"] = normalize_position(ts["position"])
