@@ -33,15 +33,15 @@ MONTH_ABBRS = tuple(map(str.lower, calendar.month_abbr))
 # good enough to be understood: 4, 4:15, 4:15:, 4:15:00pm, 4h15, 4PM, 4p, 4:15 Pm,
 # 16:15, 16:15:
 TIME_REGEX = re.compile(
-    # 1 or 2 digits. Capture the digits in group 1.
+    # 1 or 2 digits. Capture digits in 'hour'.
     r"(?P<hour>\d{1,2})"
-    # A non-digit separator (like h or :) and two digits. Capture the digits in group 2.
+    # A non-digit separator (like h or :) and two digits. Capture digits in 'minute'.
     r"(?:[^\d](?P<minute>\d{2}))?"
-    # A non-digit separator (like h or :) and two digits. Capture the digits in group 2.
+    # A non-digit separator (like h or :) and two digits. Capture digits in 'second'.
     r"(?:[^\d](?P<second>\d{2}))?"
     # Non-digit, non-letter separators
     r"[^\d\w]*"
-    # A or P, uppercase or lowercase and optional M. Capture the A or P in group 4.
+    # A or P, uppercase or lowercase and optional M. Capture 'A' or 'P' in 'ampm'.
     r"(?:(?P<ampm>[AaPp])[Mm]?)?"
 )
 
