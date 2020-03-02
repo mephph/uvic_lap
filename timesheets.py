@@ -5,6 +5,7 @@ import logging
 import os.path
 import pathlib
 import re
+from functools import wraps
 from pickle import PicklingError, UnpicklingError
 
 import pandas as pd
@@ -21,13 +22,14 @@ with open("positions.json", "r") as f:
     POSITIONS = {key.lower(): value for key, value in json.load(f).items()}
 
 # calendar.month_abbr is a calendar.py-specific type which doesn't support searching.
+# Convert it to a tuple for index method.
 MONTH_ABBRS = tuple(map(str.lower, calendar.month_abbr))
 
 # Pattern to match recognizable time strings and extract their relevant components. The
 # second section must be explicitly repeated (instead of using {0,2}) to give all
 # matches the same number of groups, and to make sure group 2 always means minute, etc.
 #
-# Note that this will match invalid strings like "35:74 PM".
+# Note that this will match invalid time strings like "35:74 PM".
 #
 # Time strings in LAP timesheets are varied. All of the following have come up and are
 # good enough to be understood: 4, 4:15, 4:15:, 4:15:00pm, 4h15, 4PM, 4p, 4:15 Pm,
@@ -85,15 +87,22 @@ EXCEL = {
 def replace_errors(func, errors, replacement=pd.NA):
     """Wrap function to replace exceptions with error values.
 
+    >>> replace_errors([0, 1, 2].index, ValueError)(3)
+    <NA>
+
+    >>> list(map(replace_errors(int, (ValueError, TypeError)), ['', [], '1']))
+    [<NA>, <NA>, 1]
+
     Args:
         func: Any callable
         errors: An exception class or a tuple of classes
         replacement: Value with which to replace exceptions
 
     Return:
-        Wrapped function with exception replacement
+        Wrapped function which replaces exceptions
     """
 
+    @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -114,7 +123,7 @@ def round_to_multiple(x, base=1):
         base: Round to nearest multiple of this
 
     Return:
-        Nearest multiple
+        Nearest multiple of the base
     """
     return round(x / base) * base
 
@@ -130,7 +139,7 @@ def fix_wrong_na(df):
     """
 
     def replace_na(x):
-        if type(x) == type(pd.NA):  # noqa: E721
+        if isinstance(x, type(pd.NA)):
             return pd.NA
         else:
             return x
@@ -147,14 +156,15 @@ def fix_wrong_na(df):
 def str_to_int(series):
     """Parse strings into ints.
 
-    Note that pd.to_numeric can't convert non-int values like '1.2' to pd.NA.
+    pd.to_numeric can't convert non-int values like '1.2' to pd.NA.
 
     Args:
         series: A Pandas series
 
     Return:
-        A Pandas series of dtype Int32
+        A Pandas series of dtype Int32, possibly with nulls
     """
+    # int raises ValueError for strings like 'a' and TypeError for values like [].
     return series.apply(replace_errors(int, (ValueError, TypeError))).astype("Int32")
 
 
@@ -176,6 +186,7 @@ def str_to_month(series):
         # Three characters are enough to identify any month.
         .str[0:3]
         .str.lower()
+        # index raises ValueError if the string isn't in the list.
         .apply(replace_errors(MONTH_ABBRS.index, ValueError))
         .astype("Int32")
     )
@@ -194,7 +205,7 @@ def drop_empty_strings(series):
 
 
 def normalize_time_string(series):
-    """Normalize time strings to 24-hour HH:MM.
+    """Normalize time strings to 24-hour HH:MM or pd.NA.
 
     Args:
         series: A string series
@@ -206,6 +217,7 @@ def normalize_time_string(series):
 
     hour = matches["hour"]
     minute = matches["minute"]
+    # The 'ampm' group only contains 'a' or 'p'.
     ampm = (matches["ampm"] + "m").fillna("")
     times = pd.to_datetime(hour + ":" + minute + ampm, errors="coerce")
 
