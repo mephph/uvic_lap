@@ -117,6 +117,7 @@
             "End Time",
             "Duration",
             "Notes"
-        ]
+        ],
+        "forbidden": []
     }
 }

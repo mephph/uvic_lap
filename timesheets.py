@@ -13,13 +13,34 @@ import pandas as pd
 ########################################################################################
 # Module constants and defaults
 
-with open("pay_periods.json", "r") as f:
-    PAY_PERIODS = json.load(f)
-
-# The Excel sheets ignore case in position names, so "Tutor" and "tutor" can appear.
-# Convert everything to lower case for matching.
-with open("positions.json", "r") as f:
-    POSITIONS = {key.lower(): value for key, value in json.load(f).items()}
+# 0-indexed row of sheet which contains column names.
+EXCEL_HEADER = 1
+# List of column names to use.
+EXCEL_USECOLS = [
+    "Position",
+    "Last Name",
+    "First Name",
+    "Class Tutored",
+    "Month",
+    "Day",
+    "Start Time",
+    "End Time",
+    "Duration",
+    "Notes",
+]
+# Internal-use names for columns.
+COLUMN_SHORT_NAMES = {
+    "Position": "position",
+    "Last Name": "last",
+    "First Name": "first",
+    "Class Tutored": "class",
+    "Month": "month",
+    "Day": "day",
+    "Start Time": "start",
+    "End Time": "end",
+    "Duration": "duration",
+    "Notes": "notes",
+}
 
 # calendar.month_abbr is a calendar.py-specific type which doesn't support searching.
 # Convert it to a tuple for index method.
@@ -47,38 +68,18 @@ TIME_REGEX = re.compile(
     r"(?:(?P<ampm>[AaPp])[Mm]?)?"
 )
 
-# Arguments for Pandas ExcelFile.parse and related Excel functions.
-EXCEL = {
-    # 0-indexed row of sheet which contains column names.
-    "header": 1,
-    # List of column names to use.
-    "usecols": [
-        "Position",
-        "Last Name",
-        "First Name",
-        "Class Tutored",
-        "Month",
-        "Day",
-        "Start Time",
-        "End Time",
-        "Duration",
-        "Notes",
-    ],
-    # Internal-use names for columns.
-    "rename": {
-        "Position": "position",
-        "Last Name": "last",
-        "First Name": "first",
-        "Class Tutored": "class",
-        "Month": "month",
-        "Day": "day",
-        "Start Time": "start",
-        "End Time": "end",
-        "Duration": "duration",
-        "Notes": "notes",
-    },
-}
+with open("pay_periods.json", "r") as f:
+    PAY_PERIODS = json.load(f)
 
+# The Excel sheets ignore case in position names, so "Tutor" and "tutor" can appear.
+# Convert everything to lower case for matching.
+with open("positions.json", "r") as f:
+    POSITIONS = {key.lower(): value for key, value in json.load(f).items()}
+
+# Replace all required and forbidden column names with short equivalents.
+for _, position in POSITIONS.items():
+    for key in ["required", "forbidden"]:
+        position[key] = list(map(COLUMN_SHORT_NAMES.get, position[key]))
 
 ########################################################################################
 # Utility functions
@@ -259,14 +260,14 @@ def concat_pay_periods(workbook):
     period_sheets = []
 
     for name in period_names:
-        sheet = workbook.parse(name, header=EXCEL["header"], usecols=EXCEL["usecols"])
+        sheet = workbook.parse(name, header=EXCEL_HEADER, usecols=EXCEL_USECOLS)
 
         # The timesheet has irrelevant entries in unused columns of early rows.
         # workbook.parse will properly ignore the entries, but will produce empty rows
         # if the data columns are empty. Also, filled rows can be interspersed with
         # unfilled rows.
         sheet.dropna(how="all", inplace=True)
-        sheet.rename(columns=EXCEL["rename"], inplace=True)
+        sheet.rename(columns=COLUMN_SHORT_NAMES, inplace=True)
 
         # Convert all columns to strings. Skip NA so they aren't converted to 'nan'.
         # astype(str) is necessary first in case the column contains numeric values.
@@ -277,7 +278,7 @@ def concat_pay_periods(workbook):
         # Record original row number and pay period for error messages. The +2 is
         # necessary because Excel rows are 1-indexed while Pandas DataFrames are
         # 0-indexed and the first row of the DataFrame is one after the header.
-        sheet["row"] = sheet.index + EXCEL["header"] + 2
+        sheet["row"] = sheet.index + EXCEL_HEADER + 2
 
         sheet["period"] = name
         sheet["period"] = sheet["period"].astype("string")
@@ -385,7 +386,7 @@ def parse_timesheet(ts):
     parsed[unchanged_columns] = ts[unchanged_columns]
 
     parsed["date"] = (
-        pd.to_datetime(parsed[["year", "month", "day"]].dropna())
+        pd.to_datetime(parsed[["year", "month", "day"]].dropna(), errors="coerce")
         .dt.strftime("%Y-%m-%d")
         .astype("string")
     )
