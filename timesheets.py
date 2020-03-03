@@ -182,7 +182,6 @@ def str_to_month(series):
         An Int32 series, possibly with nulls
     """
     return (
-        # Must drop NA values before calling replace.
         series.dropna()
         # Three characters are enough to identify any month.
         .str[0:3]
@@ -219,6 +218,8 @@ def normalize_time_string(series):
     hour = matches["hour"]
     minute = matches["minute"]
     # The 'ampm' group only contains 'a' or 'p'.
+    # If the string doesn't contain anything like 'am' or 'pm' then matches['ampm'] is
+    # NA, and the entire string argument to to_datetime is NA. fillna("") avoids that.
     ampm = (matches["ampm"] + "m").fillna("")
     times = pd.to_datetime(hour + ":" + minute + ampm, errors="coerce")
 
