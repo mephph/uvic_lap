@@ -72,7 +72,6 @@
         "required": [
             "Month",
             "Day",
-            "Year",
             "Start Time",
             "End Time",
             "Duration"

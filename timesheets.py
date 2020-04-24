@@ -5,7 +5,10 @@ import logging
 import os.path
 import pathlib
 import re
+from collections import namedtuple
+from enum import Enum
 from functools import wraps
+from itertools import chain
 from pickle import PicklingError, UnpicklingError
 
 import pandas as pd
@@ -33,7 +36,8 @@ COLUMN_SHORT_NAMES = {
     "Position": "position",
     "Last Name": "last",
     "First Name": "first",
-    "Class Tutored": "class",
+    # 'class' conflicts with the class keyword in several settings.
+    "Class Tutored": "course",
     "Month": "month",
     "Day": "day",
     "Start Time": "start",
@@ -41,6 +45,7 @@ COLUMN_SHORT_NAMES = {
     "Duration": "duration",
     "Notes": "notes",
 }
+COLUMN_LONG_NAMES = {v: k for k, v in COLUMN_SHORT_NAMES.items()}
 
 # calendar.month_abbr is a calendar.py-specific type which doesn't support searching.
 # Convert it to a tuple for index method.
@@ -80,6 +85,58 @@ with open("positions.json", "r") as f:
 for _, position in POSITIONS.items():
     for key in ["required", "forbidden"]:
         position[key] = list(map(COLUMN_SHORT_NAMES.get, position[key]))
+
+
+########################################################################################
+# Classes
+
+# Levels of timesheet entry errors.
+ErrorLevel = Enum("ErrorLevel", ("COMMENT", "WARNING", "CRITICAL"))
+
+
+class TSError(namedtuple("TSError", ("mask", "message", "level"))):
+    """A timesheet error, including level, timesheet mask, and message template."""
+
+    @classmethod
+    def comment(cls, mask, message):  # noqa: D401
+        """Data in timesheet is not in error but requires a comment."""
+        """
+
+        Args:
+            mask: A Boolean mask of relevant timesheet rows
+            message: Template for error messages
+
+        Return:
+            TSError with level 'COMMENT'
+        """
+        return cls(mask, message, ErrorLevel.COMMENT)
+
+    @classmethod
+    def warning(cls, mask, message):
+        """Incorrect but recoverable data in timesheet.
+
+        Args:
+            mask: A Boolean mask of relevant timesheet rows
+            message: Template for error messages
+
+        Return:
+            TSError with level 'WARNING'
+        """
+        return cls(mask, message, ErrorLevel.WARNING)
+
+    @classmethod
+    def critical(cls, mask, message):
+        """Irrecoverable error in timesheet.
+
+        Args:
+            mask: A Boolean mask of relevant timesheet rows
+            message: Template for error messages
+
+        Return:
+            TSError with level 'WARNING'
+        """
+        return cls(mask, message, ErrorLevel.CRITICAL)
+
 
 ########################################################################################
 # Utility functions
@@ -226,6 +283,34 @@ def normalize_time_string(series):
     return times.dt.strftime("%H:%M").astype("string")
 
 
+def parse_time_string(series, year=None, month=None, day=None):
+    """Parse time strings to Pandas timestamps.
+
+    Args:
+        series: A string series
+
+    Return:
+        A Pandas timestamp series, possibly with nulls
+    """
+    matches = series.str.extract(TIME_REGEX)
+
+    hour = matches["hour"]
+    minute = matches["minute"]
+    # The 'ampm' group only contains 'a' or 'p'.
+    # If the string doesn't contain anything like 'am' or 'pm' then matches['ampm'] is
+    # NA, and the entire string argument to to_datetime is NA. fillna("") avoids that.
+    ampm = (matches["ampm"] + "m").fillna("")
+
+    if year is not None and month is not None and day is not None:
+        dates = year + "-" + month + "-" + day
+    else:
+        dates = ""
+
+    times = hour + ":" + minute + ampm
+
+    return pd.to_datetime(dates + times, errors="coerce")
+
+
 def normalize_position(series):
     """Normalize position names to lowercase and replace invalid names with pd.NA.
 
@@ -238,6 +323,183 @@ def normalize_position(series):
     position = series.str.lower()
 
     return position[position.isin(POSITIONS)]
+
+
+########################################################################################
+# Error detection
+#
+# Error detection functions return a list of TSErrors.
+
+
+def position_errors(ts, parsed):
+    """Detect missing and invalid entries in the Position column.
+
+    Args:
+        ts: A timesheet DataFrame
+        parsed: A parsed timesheet DataFrame
+
+    Return:
+        List of TSError, possibly empty
+    """
+    errors = []
+
+    missing_position = ts["position"].isna()
+    if missing_position.sum():
+        errors.append(TSError.critical(missing_position, "Missing entry: Position"))
+
+    invalid_position = ~missing_position & parsed["position"].isna()
+    if invalid_position.sum():
+        errors.append(
+            TSError.critical(invalid_position, "Invalid position: {position}")
+        )
+
+    return errors
+
+
+def required_entry_errors(ts, parsed):
+    """Detect missing entries which are required for the position.
+
+    Args:
+        ts: A timesheet DataFrame
+        parsed: A parsed timesheet DataFrame
+
+    Return:
+        List of TSError, possibly empty
+    """
+    errors = []
+
+    for position in POSITIONS:
+        position_mask = (parsed["position"] == position).fillna(False)
+
+        for column in POSITIONS[position]["required"]:
+            has_entry = ts[column].notna().fillna(False)
+            missing = position_mask & ~has_entry
+
+            if missing.sum():
+                message = f"Missing required entry: {column}"
+                errors.append(TSError.critical(missing, message))
+
+    return errors
+
+
+def forbidden_entry_errors(ts, parsed):
+    """Detect entries which are present but forbidden for the position.
+
+    Args:
+        ts: A timesheet DataFrame
+        parsed: A parsed timesheet DataFrame
+
+    Return:
+        List of TSError, possibly empty
+    """
+    errors = []
+
+    for position in POSITIONS:
+        position_mask = (parsed["position"] == position).fillna(False)
+
+        for column in POSITIONS[position]["forbidden"]:
+            has_entry = ts[column].notna().fillna(False)
+            forbidden_entry = position_mask & has_entry
+
+            if forbidden_entry.sum():
+                long_name = COLUMN_LONG_NAMES[column]
+                message = f"{long_name} should be blank instead of: {{{column}}}"
+                errors.append(TSError.warning(forbidden_entry, message))
+
+    return errors
+
+
+def invalid_entry_errors(ts, parsed):
+    """Detect entries which are invalid for their type.
+
+    Args:
+        ts: A timesheet DataFrame
+        parsed: A parsed timesheet DataFrame
+
+    Return:
+        List of TSError, possibly empty
+    """
+    errors = []
+
+    for column in COLUMN_LONG_NAMES:
+        invalid_entry = (ts[column].notna() & parsed[column].isna()).fillna(False)
+
+        if invalid_entry.sum():
+            long_name = COLUMN_LONG_NAMES[column]
+            message = f"{long_name} entry not understood: {{{column}}}"
+            errors.append(TSError.critical(invalid_entry, message))
+
+    return errors
+
+
+def date_errors(ts, parsed):
+    """Detect errors in the date, like March 35.
+
+    Args:
+        ts: A timesheet DataFrame
+        parsed: A parsed timesheet DataFrame
+
+    Return:
+        List of TSError, possibly empty
+    """
+    errors = []
+
+    has_date_components = parsed[["year", "month", "day"]].notna().all(axis=1)
+    invalid_date = parsed["date"].isna()
+    invalid_day = has_date_components & invalid_date
+
+    if invalid_day.sum():
+        errors.append(
+            TSError.critical(invalid_day, "Invalid day for {month} {year}: {day}")
+        )
+
+    return errors
+
+
+def duration_errors(ts, parsed):
+    """Detect incorrect duration for the entry's start and end times.
+
+    Args:
+        ts: A timesheet DataFrame
+        parsed: A parsed timesheet DataFrame
+
+    Return:
+        List of TSError, possibly empty
+    """
+    times = parsed[["start", "end"]]
+    times_present = times.notna().all(axis=1)
+    return times_present
+
+
+def timesheet_errors(ts, parsed):
+    """Detect and combine all timesheet errors.
+
+    Args:
+        ts: A timesheet DataFrame
+        parsed: A parsed timesheet DataFrame
+
+    Return:
+        A DataFrame with 'message', 'level', and 'row' columns.
+    """
+    error_functions = [
+        position_errors,
+        required_entry_errors,
+        forbidden_entry_errors,
+        invalid_entry_errors,
+        date_errors,
+    ]
+
+    error_dfs = []
+
+    # The error functions return lists and chain.from_iterable concatenates them.
+    for error in chain.from_iterable(func(ts, parsed) for func in error_functions):
+        messages = ts[error.mask].apply(lambda row: error.message.format(**row), axis=1)
+        error_df = messages.to_frame(name="message").astype("string")
+        error_df["level"] = error.level
+        error_df["row"] = error_df.index
+        error_dfs.append(error_df)
+
+    return pd.concat(error_dfs, ignore_index=True)
 
 
 ########################################################################################
@@ -315,7 +577,7 @@ def load_timesheet(path, load_pickle=True, save_pickle=True):
 
                 return timesheet
             except UnpicklingError:
-                logging.error(f"Couldn't unpickle {pickle_path}. Loading original.")
+                logging.critical(f"Couldn't unpickle {pickle_path}. Loading original.")
 
     timesheet = concat_pay_periods(pd.ExcelFile(path))
 
@@ -331,11 +593,11 @@ def load_timesheet(path, load_pickle=True, save_pickle=True):
             timesheet["year"] = year
         # Last four digits aren't a valid integer.
         except ValueError:
-            logging.error(f"Unexpected semester format in filename: {semester}")
+            logging.critical(f"Unexpected semester format in filename: {semester}")
             timesheet["year"] = pd.NA
     # Incorrect number of parts in filename.
     except ValueError:
-        logging.error(f"Unexpected filename format: {path.stem}")
+        logging.critical(f"Unexpected filename format: {path.stem}")
         timesheet["provider"] = pd.NA
 
     # string and Int32 are nullable.
@@ -356,7 +618,7 @@ def load_timesheet(path, load_pickle=True, save_pickle=True):
         try:
             timesheet.to_pickle(pickle_path)
         except PicklingError:
-            logging.error(f"Couldn't pickle to {pickle_path}")
+            logging.critical(f"Couldn't pickle to {pickle_path}")
 
     return timesheet
 
@@ -375,7 +637,7 @@ def parse_timesheet(ts):
     parsed["position"] = normalize_position(ts["position"])
     parsed["last"] = drop_empty_strings(ts["last"])
     parsed["first"] = drop_empty_strings(ts["first"])
-    parsed["class"] = drop_empty_strings(ts["class"])
+    parsed["course"] = drop_empty_strings(ts["course"])
     parsed["month"] = str_to_month(ts["month"])
     parsed["day"] = str_to_int(ts["day"])
     parsed["start"] = normalize_time_string(ts["start"])
